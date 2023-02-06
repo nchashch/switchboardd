@@ -2056,6 +2056,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "switchboard"
+version = "0.1.0"
+source = "git+https://github.com/nchashch/switchboard?rev=59f94717b5a9ba6d5e67e6d9988d77caf1aae35b#59f94717b5a9ba6d5e67e6d9988d77caf1aae35b"
+dependencies = [
+ "anyhow",
+ "base64 0.13.1",
+ "bitcoin",
+ "bytes",
+ "clap",
+ "flate2",
+ "hex",
+ "http",
+ "jsonrpsee",
+ "reqwest",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "sha256",
+ "tar",
+ "thiserror",
+ "tokio",
+ "web3",
+]
+
+[[package]]
 name = "switchboard-cli"
 version = "0.1.0"
 dependencies = [
@@ -2066,7 +2091,7 @@ dependencies = [
  "dirs",
  "jsonrpsee",
  "serde_json",
- "switchboard",
+ "switchboard 0.1.0",
  "tokio",
 ]
 
@@ -2082,7 +2107,7 @@ dependencies = [
  "futures",
  "hyper",
  "jsonrpsee",
- "switchboard",
+ "switchboard 0.1.0 (git+https://github.com/nchashch/switchboard?rev=59f94717b5a9ba6d5e67e6d9988d77caf1aae35b)",
  "tokio",
 ]
 
