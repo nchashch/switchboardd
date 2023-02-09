@@ -5,7 +5,7 @@ use jsonrpsee::types::ErrorObject;
 use serde_json::Value;
 use std::path::PathBuf;
 use switchboard::{
-    api::{Chain, Sidechain},
+    api::{get_message, Chain, Sidechain},
     config::Config,
     server::SwitchboardRpcClient,
 };
@@ -38,6 +38,11 @@ enum Commands {
     },
     /// Call mainchain RPC directly
     Main {
+        method: String,
+        params: Option<Vec<String>>,
+    },
+    /// Call geth RPC directly
+    Ethereum {
         method: String,
         params: Option<Vec<String>>,
     },
@@ -127,10 +132,7 @@ async fn main() -> Result<()> {
                         format!("{:#}", result)
                     }
                 }
-                Err(jsonrpsee::core::Error::Call(err)) => {
-                    ErrorObject::from(err).message().to_string()
-                }
-                Err(err) => format!("{}", err),
+                Err(err) => get_message(err),
             };
             println!("{}", result);
         }
@@ -149,10 +151,16 @@ async fn main() -> Result<()> {
                         format!("{:#}", result)
                     }
                 }
-                Err(jsonrpsee::core::Error::Call(err)) => {
-                    ErrorObject::from(err).message().to_string()
+                Err(err) => get_message(err),
+            };
+            println!("{}", result);
+        }
+        Commands::Ethereum { method, params } => {
+            let result = match client.ethereum(method.clone(), prepare_params(params)).await {
+                Ok(result) => {
+                    format!("{:#}", result)
                 }
-                Err(err) => format!("{}", err),
+                Err(err) => get_message(err),
             };
             println!("{}", result);
         }
