@@ -1,14 +1,13 @@
+mod amount;
+use amount::AmountBtc;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use jsonrpsee::http_client::HttpClientBuilder;
-use jsonrpsee::types::ErrorObject;
-use serde_json::Value;
+use futures::executor::block_on;
+use hex::ToHex;
 use std::path::PathBuf;
-use switchboard::{
-    api::{get_message, Chain, Sidechain},
-    config::Config,
-    server::SwitchboardRpcClient,
-};
+use switchboard::{config::Config, format_deposit_address};
+use ureq_jsonrpc::json;
+use web3::{types::U256, Transport};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -41,20 +40,11 @@ enum Commands {
         method: String,
         params: Option<Vec<String>>,
     },
-    /// Call geth RPC directly
-    Ethereum {
-        method: String,
-        params: Option<Vec<String>>,
-    },
     GethConsole,
     /// Get balances for mainchain and all sidechains
     Getbalances,
     /// Get block counts for mainchain and all sidechains
     Getblockcounts,
-    /// Get a new address
-    Getnewaddress {
-        chain: Chain,
-    },
     /// Create a deposit to a sidechain
     Deposit {
         /// Sidechain to deposit to
@@ -90,99 +80,95 @@ enum Commands {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let args = Cli::parse();
     let home_dir = dirs::home_dir().unwrap();
     let datadir = args
         .datadir
         .unwrap_or_else(|| home_dir.join(".switchboard"));
     let config: Config = confy::load_path(datadir.join("config.toml"))?;
-    let address = format!("http://{}", config.switchboard.socket_address()?);
-    let client = HttpClientBuilder::default().build(address)?;
+
+    let main = ureq_jsonrpc::Client {
+        host: "localhost".to_string(),
+        port: config.main.port,
+        user: config.switchboard.rpcuser.clone(),
+        password: config.switchboard.rpcpassword.clone(),
+        id: "switchboard-cli".to_string(),
+    };
+
+    let zcash = ureq_jsonrpc::Client {
+        host: "localhost".to_string(),
+        port: config.zcash.port,
+        user: config.switchboard.rpcuser.clone(),
+        password: config.switchboard.rpcpassword.clone(),
+        id: "switchboard-cli".to_string(),
+    };
+
+    let eth_transport =
+        web3::transports::Http::new(&format!("http://localhost:{}", config.ethereum.port))?;
+    let web3 = web3::Web3::new(eth_transport.clone());
+
     match args.commands {
         Commands::Generate { number, amount } => {
-            let hashes = client
-                .generate(
-                    number,
-                    amount
-                        .unwrap_or(bitcoin::Amount::from_btc(0.0001)?)
-                        .to_sat(),
-                )
-                .await?;
-            for hash in hashes[..hashes.len() - 1].iter() {
-                println!("{}", hash);
-            }
-            if let Some(hash) = hashes.last() {
+            let amount = amount.unwrap_or(bitcoin::Amount::from_btc(0.0001)?);
+            let hashes = zcash.send_request::<Vec<bitcoin::BlockHash>>(
+                "generate",
+                &[json!(number), json!(AmountBtc(amount))],
+            )?;
+            for hash in &hashes {
                 println!("{}", hash);
             }
         }
         Commands::Zcash { method, params } => {
-            let result = match client.zcash(method.clone(), prepare_params(params)).await {
-                Ok(result) => {
-                    if method == "help" {
-                        let help_string = format!("{}", result)
-                            .replace("\\n", "\n")
-                            .replace("\\\"", "\"");
-                        let mut chars = help_string.chars();
-                        chars.next();
-                        chars.next_back();
-                        chars.as_str().into()
-                    } else {
-                        format!("{:#}", result)
-                    }
-                }
-                Err(err) => get_message(err),
+            let params: Vec<ureq_jsonrpc::Value> =
+                params.iter().map(|param| json!(param)).collect();
+            let result = zcash.send_request::<ureq_jsonrpc::Value>(&method, &params)?;
+            match result.as_str() {
+                Some(result) => println!("{}", result),
+                None => println!("{}", result),
             };
-            println!("{}", result);
         }
         Commands::Main { method, params } => {
-            let result = match client.main(method.clone(), prepare_params(params)).await {
-                Ok(result) => {
-                    if method == "help" {
-                        let help_string = format!("{}", result)
-                            .replace("\\n", "\n")
-                            .replace("\\\"", "\"");
-                        let mut chars = help_string.chars();
-                        chars.next();
-                        chars.next_back();
-                        chars.as_str().into()
-                    } else {
-                        format!("{:#}", result)
-                    }
-                }
-                Err(err) => get_message(err),
+            let params: Vec<ureq_jsonrpc::Value> =
+                params.iter().map(|param| json!(param)).collect();
+            let result = main.send_request::<ureq_jsonrpc::Value>(&method, &params)?;
+            match result.as_str() {
+                Some(result) => println!("{}", result),
+                None => println!("{}", result),
             };
-            println!("{}", result);
-        }
-        Commands::Ethereum { method, params } => {
-            let result = match client.ethereum(method.clone(), prepare_params(params)).await {
-                Ok(result) => {
-                    format!("{:#}", result)
-                }
-                Err(err) => get_message(err),
-            };
-            println!("{}", result);
         }
         Commands::GethConsole => {
             let ipc_file = datadir.join("data/ethereum/geth.ipc");
-            let ethereum = tokio::process::Command::new(datadir.join("bin/geth"))
+            std::process::Command::new(datadir.join("bin/geth"))
                 .arg("attach")
                 .arg(format!("{}", ipc_file.display()))
                 .spawn()?
-                .wait()
-                .await?;
+                .wait()?;
         }
         Commands::Getbalances => {
-            let balances = client.getbalances().await?;
-            println!("{}", balances);
+            let main = *main.send_request::<AmountBtc>("getbalance", &[])?;
+            let zcash = *zcash.send_request::<AmountBtc>("getbalance", &[])?;
+            let ethereum = {
+                pub const SATOSHI: u64 = 10_000_000_000;
+                let accounts = block_on(web3.eth().accounts())?;
+                let mut balance = U256::zero();
+                for account in accounts.iter() {
+                    balance += block_on(web3.eth().balance(*account, None))?;
+                }
+                let sat = (balance / SATOSHI).as_u64();
+                bitcoin::Amount::from_sat(sat)
+            };
+            println!("main:     {:>24}", format!("{}", main));
+            println!("zcash:    {:>24}", format!("{}", zcash));
+            println!("ethereum: {:>24}", format!("{}", ethereum));
         }
         Commands::Getblockcounts => {
-            let block_counts = client.getblockcounts().await?;
-            println!("{}", block_counts);
-        }
-        Commands::Getnewaddress { chain } => {
-            println!("{}", client.getnewaddress(chain).await?);
+            let main = main.send_request::<usize>("getblockcount", &[])?;
+            let zcash = zcash.send_request::<usize>("getblockcount", &[])?;
+            let ethereum = block_on(web3.eth().block_number())?.as_usize();
+            println!("main:     {:>24}", format!("{}", main));
+            println!("zcash:    {:>24}", format!("{}", zcash));
+            println!("ethereum: {:>24}", format!("{}", ethereum));
         }
         Commands::Deposit {
             sidechain,
@@ -190,9 +176,26 @@ async fn main() -> Result<()> {
             fee,
         } => {
             let fee = fee.unwrap_or(bitcoin::Amount::from_btc(0.0001)?);
-            let txid = client
-                .deposit(sidechain, amount.to_sat(), fee.to_sat())
-                .await?;
+            let address = match sidechain {
+                Sidechain::Zcash => zcash.send_request::<String>("getnewaddress", &[])?,
+                Sidechain::Ethereum => {
+                    let accounts = block_on(web3.eth().accounts())?;
+                    let account = accounts
+                        .first()
+                        .ok_or(anyhow::Error::msg("No available Ethereum addresses"))?;
+                    format!("0x{}", account.encode_hex::<String>())
+                }
+            };
+            let address = format_deposit_address(sidechain.number(), address);
+            let txid = main.send_request::<bitcoin::Txid>(
+                "createsidechaindeposit",
+                &[
+                    json!(sidechain.number()),
+                    json!(address),
+                    json!(AmountBtc(amount)),
+                    json!(AmountBtc(fee)),
+                ],
+            )?;
             println!(
                 "created deposit of {} to {} with fee {} and txid = {}",
                 amount, sidechain, fee, txid
@@ -204,9 +207,27 @@ async fn main() -> Result<()> {
             fee,
         } => {
             let fee = fee.unwrap_or(bitcoin::Amount::from_btc(0.0001)?);
-            client
-                .withdraw(sidechain, amount.to_sat(), fee.to_sat())
-                .await?;
+            match sidechain {
+                Sidechain::Zcash => {
+                    zcash.send_request::<String>(
+                        "withdraw",
+                        &[json!(AmountBtc(amount)), json!(AmountBtc(fee))],
+                    )?;
+                }
+                Sidechain::Ethereum => {
+                    let accounts = block_on(web3.eth().accounts())?;
+                    let account = accounts
+                        .first()
+                        .ok_or(anyhow::Error::msg("No available Ethereum addresses"))?;
+                    let account = format!("0x{}", account.encode_hex::<String>());
+                    let amount: U256 = (amount.to_sat()).into();
+                    let fee: U256 = (fee.to_sat()).into();
+                    block_on(eth_transport.execute(
+                        "eth_withdraw",
+                        vec![json!(account), json!(amount), json!(fee)],
+                    ))?;
+                }
+            };
             println!(
                 "created withdrawal of {} from {} with fee {}",
                 amount, sidechain, fee
@@ -218,9 +239,14 @@ async fn main() -> Result<()> {
             fee,
         } => {
             let fee = fee.unwrap_or(bitcoin::Amount::from_btc(0.0001)?);
-            client
-                .refund(sidechain, amount.to_sat(), fee.to_sat())
-                .await?;
+            match sidechain {
+                Sidechain::Zcash => zcash
+                    .send_request("refund", &[json!(AmountBtc(amount)), json!(AmountBtc(fee))])?,
+                Sidechain::Ethereum => {
+                    println!("ATTENTION: Automatic refunds are not supported for ethereum, use geth-console to make a refund");
+                    return Ok(());
+                }
+            }
             println!(
                 "refunded {} to {} with change withdrawal fee {}",
                 amount, sidechain, fee
@@ -230,13 +256,51 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn prepare_params(params: Option<Vec<String>>) -> Option<Vec<Value>> {
-    params.map(|p| {
-        p.into_iter()
-            .map(|param| match param.parse() {
-                Ok(param) => param,
-                Err(_) => Value::String(param),
-            })
-            .collect()
-    })
+use serde::{Deserialize, Serialize};
+
+#[derive(Copy, Clone, Debug, clap::ValueEnum, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Chain {
+    Main,
+    Zcash,
+    Ethereum,
+}
+
+impl std::fmt::Display for Chain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Chain::Main => write!(f, "main"),
+            Chain::Zcash => write!(f, "zcash"),
+            Chain::Ethereum => write!(f, "ethereum"),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, clap::ValueEnum, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Sidechain {
+    Zcash,
+    Ethereum,
+}
+
+impl std::fmt::Display for Sidechain {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        self.chain().fmt(f)
+    }
+}
+
+impl Sidechain {
+    pub fn chain(&self) -> Chain {
+        match self {
+            Sidechain::Zcash => Chain::Zcash,
+            Sidechain::Ethereum => Chain::Ethereum,
+        }
+    }
+
+    pub fn number(&self) -> usize {
+        match self {
+            Sidechain::Zcash => 0,
+            Sidechain::Ethereum => 1,
+        }
+    }
 }
