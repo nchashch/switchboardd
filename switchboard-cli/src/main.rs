@@ -33,13 +33,14 @@ enum Commands {
     /// Call zcash RPC directly
     Zcash {
         method: String,
-        params: Option<Vec<String>>,
+        params: Vec<String>,
     },
     /// Call mainchain RPC directly
     Main {
         method: String,
-        params: Option<Vec<String>>,
+        params: Vec<String>,
     },
+    /// Open geth console to get access to the ethereum JSRE
     GethConsole,
     /// Get balances for mainchain and all sidechains
     Getbalances,
@@ -80,7 +81,8 @@ enum Commands {
     },
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let args = Cli::parse();
     let home_dir = dirs::home_dir().unwrap();
     let datadir = args
@@ -120,21 +122,26 @@ fn main() -> Result<()> {
             }
         }
         Commands::Zcash { method, params } => {
-            let params: Vec<ureq_jsonrpc::Value> =
-                params.iter().map(|param| json!(param)).collect();
+            let params: Vec<ureq_jsonrpc::Value> = params
+                .iter()
+                .map(|param| serde_json::from_str(param).unwrap_or(json!(param)))
+                .collect();
+            dbg!(&method, &params);
             let result = zcash.send_request::<ureq_jsonrpc::Value>(&method, &params)?;
             match result.as_str() {
                 Some(result) => println!("{}", result),
-                None => println!("{}", result),
+                None => println!("{}", serde_json::to_string_pretty(&result)?),
             };
         }
         Commands::Main { method, params } => {
-            let params: Vec<ureq_jsonrpc::Value> =
-                params.iter().map(|param| json!(param)).collect();
+            let params: Vec<ureq_jsonrpc::Value> = params
+                .iter()
+                .map(|param| serde_json::from_str(param).unwrap_or(json!(param)))
+                .collect();
             let result = main.send_request::<ureq_jsonrpc::Value>(&method, &params)?;
             match result.as_str() {
                 Some(result) => println!("{}", result),
-                None => println!("{}", result),
+                None => println!("{}", serde_json::to_string_pretty(&result)?),
             };
         }
         Commands::GethConsole => {
@@ -149,13 +156,15 @@ fn main() -> Result<()> {
             let main = *main.send_request::<AmountBtc>("getbalance", &[])?;
             let zcash = *zcash.send_request::<AmountBtc>("getbalance", &[])?;
             let ethereum = {
-                pub const SATOSHI: u64 = 10_000_000_000;
-                let accounts = block_on(web3.eth().accounts())?;
+                let satoshi: u64 = 10_000_000_000;
+                let satoshi: U256 = satoshi.into();
+                let accounts = web3.eth().accounts().await?;
                 let mut balance = U256::zero();
                 for account in accounts.iter() {
-                    balance += block_on(web3.eth().balance(*account, None))?;
+                    balance += web3.eth().balance(*account, None).await?;
                 }
-                let sat = (balance / SATOSHI).as_u64();
+                dbg!(balance);
+                let sat = (balance / satoshi).as_u64();
                 bitcoin::Amount::from_sat(sat)
             };
             println!("main:     {:>24}", format!("{}", main));
@@ -165,7 +174,7 @@ fn main() -> Result<()> {
         Commands::Getblockcounts => {
             let main = main.send_request::<usize>("getblockcount", &[])?;
             let zcash = zcash.send_request::<usize>("getblockcount", &[])?;
-            let ethereum = block_on(web3.eth().block_number())?.as_usize();
+            let ethereum = web3.eth().block_number().await?.as_usize();
             println!("main:     {:>24}", format!("{}", main));
             println!("zcash:    {:>24}", format!("{}", zcash));
             println!("ethereum: {:>24}", format!("{}", ethereum));
@@ -179,7 +188,7 @@ fn main() -> Result<()> {
             let address = match sidechain {
                 Sidechain::Zcash => zcash.send_request::<String>("getnewaddress", &[])?,
                 Sidechain::Ethereum => {
-                    let accounts = block_on(web3.eth().accounts())?;
+                    let accounts = web3.eth().accounts().await?;
                     let account = accounts
                         .first()
                         .ok_or(anyhow::Error::msg("No available Ethereum addresses"))?;
@@ -215,17 +224,19 @@ fn main() -> Result<()> {
                     )?;
                 }
                 Sidechain::Ethereum => {
-                    let accounts = block_on(web3.eth().accounts())?;
+                    let accounts = web3.eth().accounts().await?;
                     let account = accounts
                         .first()
                         .ok_or(anyhow::Error::msg("No available Ethereum addresses"))?;
                     let account = format!("0x{}", account.encode_hex::<String>());
                     let amount: U256 = (amount.to_sat()).into();
                     let fee: U256 = (fee.to_sat()).into();
-                    block_on(eth_transport.execute(
-                        "eth_withdraw",
-                        vec![json!(account), json!(amount), json!(fee)],
-                    ))?;
+                    eth_transport
+                        .execute(
+                            "eth_withdraw",
+                            vec![json!(account), json!(amount), json!(fee)],
+                        )
+                        .await?;
                 }
             };
             println!(

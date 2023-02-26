@@ -25,7 +25,7 @@ fn main() -> Result<()> {
     let config: Config = confy::load_path(datadir.join("config.toml"))?;
     let url = args
         .bin_download_url
-        .unwrap_or("http://localhost:8080/bin.tar.gz".to_string());
+        .unwrap_or("http://drivechain.info/releases/bin/bin.tar.gz".to_string());
     let mut daemons = Daemons::start(&url, &datadir, &config)?;
     let (tx, rx): (Sender<()>, Receiver<()>) = mpsc::channel();
     ctrlc::set_handler(move || {
@@ -33,6 +33,5 @@ fn main() -> Result<()> {
     })
     .expect("Error setting Ctrl-C handler");
     rx.recv()?;
-    daemons.stop()?;
     Ok(())
 }
